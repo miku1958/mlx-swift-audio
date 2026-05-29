@@ -80,8 +80,9 @@ public struct CosyVoice3Speaker: Sendable {
     self.transcription = transcription
   }
 
-  /// The reference's natural "speech tokens per text token" ratio (system prefix excluded
-  /// from the text-token count).
+  /// The reference's natural "voiced speech tokens per text token" ratio (system prefix
+  /// excluded from the text-token count; silent/breath tokens excluded from the speech-token
+  /// count).
   ///
   /// Zero-shot generation does not reproduce the reference's speaking rate — the LLM
   /// normalizes pace toward its training prior, so a slow reference still yields
@@ -89,13 +90,22 @@ public struct CosyVoice3Speaker: Sendable {
   /// drive the auto speed control, which time-scales the mel so the output's
   /// tokens-per-character rate tracks the reference.
   ///
+  /// Silent/breath tokens (`cosyVoice3SilentTokens`) are excluded: pauses in the reference
+  /// are still encoded as speech tokens by the S3 tokenizer, so counting them inflates the
+  /// ratio for references with many pauses (making the derived output too slow). Counting
+  /// only voiced tokens makes the ratio reflect the actual speaking rate, consistent across
+  /// references with different pause amounts.
+  ///
   /// Only meaningful in zero-shot mode (an explicit transcription is present); returns
   /// `nil` for cross-lingual references that have no prompt text.
   public var promptTokensPerTextTokenRatio: Float? {
     guard let nonPrefixLen = conditionals.promptTextLenWithoutPrefix, nonPrefixLen > 0 else {
       return nil
     }
-    let speechTokenCount = Float(conditionals.promptSpeechTokenLen[0].item(Int32.self))
+    let allTokens = conditionals.promptSpeechToken.asArray(Int32.self)
+    let voicedCount = allTokens.reduce(0) { cosyVoice3SilentTokens.contains(Int($1)) ? $0 : $0 + 1 }
+    // Fallback to the total count if every token is silent (should not happen) to avoid a zero numerator.
+    let speechTokenCount = Float(voicedCount > 0 ? voicedCount : allTokens.count)
     return speechTokenCount / Float(nonPrefixLen)
   }
 }
