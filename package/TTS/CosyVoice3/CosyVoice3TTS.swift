@@ -392,11 +392,17 @@ actor CosyVoice3TTS {
     // CosyVoice3 requires the format: "You are a helpful assistant.<|endofprompt|>ref text"
     var promptText: MLXArray?
     var promptTextLen: MLXArray?
+    var promptTextLenWithoutPrefix: Int?
     if let text = refText?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
       let formattedText = text.hasPrefix(Self.systemPrefix) ? text : Self.systemPrefix + text
       let tokens = encode(text: formattedText, addSpecialTokens: false)
       promptText = MLXArray(tokens.map { Int32($0) }).reshaped(1, -1)
       promptTextLen = MLXArray([Int32(tokens.count)])
+      // Subtract the system prefix tokens to get the reference text's true token count,
+      // used by the auto speed control to compute the reference's speech-token/text-token
+      // ratio (see `CosyVoice3Model.synthesize`).
+      let prefixTokens = encode(text: Self.systemPrefix, addSpecialTokens: false)
+      promptTextLenWithoutPrefix = max(0, tokens.count - prefixTokens.count)
     }
 
     return CosyVoice3Conditionals(
@@ -406,19 +412,24 @@ actor CosyVoice3TTS {
       promptMelLen: alignedMelLen,
       speakerEmbedding: speakerEmb,
       promptText: promptText,
-      promptTextLen: promptTextLen
+      promptTextLen: promptTextLen,
+      promptTextLenWithoutPrefix: promptTextLenWithoutPrefix
     )
   }
 
   // MARK: - Generation
 
   /// Generate audio from text using pre-computed conditionals (zero-shot mode)
+  /// `speed` / `targetTokensPerTextToken` are forwarded to the model for mel-domain time
+  /// scaling (see `CosyVoice3Model.synthesize`).
   func generateZeroShot(
     text _: String,
     textTokens: [Int],
     conditionals: CosyVoice3Conditionals,
     sampling: Int = 25,
-    nTimesteps: Int = 10
+    nTimesteps: Int = 10,
+    speed: Float = 1.0,
+    targetTokensPerTextToken: Float? = nil
   ) throws -> TTSGenerationResult {
     let startTime = CFAbsoluteTimeGetCurrent()
 
@@ -442,7 +453,9 @@ actor CosyVoice3TTS {
       promptMelLen: conditionals.promptMelLen,
       speakerEmbedding: conditionals.speakerEmbedding,
       sampling: sampling,
-      nTimesteps: nTimesteps
+      nTimesteps: nTimesteps,
+      speed: speed,
+      targetTokensPerTextToken: targetTokensPerTextToken
     )
 
     audio.eval()
@@ -457,12 +470,16 @@ actor CosyVoice3TTS {
   }
 
   /// Generate audio from text using cross-lingual mode (no reference transcription)
+  /// `speed` / `targetTokensPerTextToken` are forwarded for mel-domain time scaling
+  /// (see `CosyVoice3Model.synthesize`).
   func generateCrossLingual(
     text: String,
     textTokens _: [Int],
     conditionals: CosyVoice3Conditionals,
     sampling: Int = 25,
-    nTimesteps: Int = 10
+    nTimesteps: Int = 10,
+    speed: Float = 1.0,
+    targetTokensPerTextToken: Float? = nil
   ) throws -> TTSGenerationResult {
     let startTime = CFAbsoluteTimeGetCurrent()
 
@@ -482,7 +499,9 @@ actor CosyVoice3TTS {
       promptMelLen: conditionals.promptMelLen,
       speakerEmbedding: conditionals.speakerEmbedding,
       sampling: sampling,
-      nTimesteps: nTimesteps
+      nTimesteps: nTimesteps,
+      speed: speed,
+      targetTokensPerTextToken: targetTokensPerTextToken
     )
 
     audio.eval()

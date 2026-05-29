@@ -79,6 +79,25 @@ public struct CosyVoice3Speaker: Sendable {
     self.hasExplicitTranscription = transcription != nil && hasExplicitTranscription
     self.transcription = transcription
   }
+
+  /// The reference's natural "speech tokens per text token" ratio (system prefix excluded
+  /// from the text-token count).
+  ///
+  /// Zero-shot generation does not reproduce the reference's speaking rate — the LLM
+  /// normalizes pace toward its training prior, so a slow reference still yields
+  /// average-paced output. Pass this value as `generate(targetTokensPerTextToken:)` to
+  /// drive the auto speed control, which time-scales the mel so the output's
+  /// tokens-per-character rate tracks the reference.
+  ///
+  /// Only meaningful in zero-shot mode (an explicit transcription is present); returns
+  /// `nil` for cross-lingual references that have no prompt text.
+  public var promptTokensPerTextTokenRatio: Float? {
+    guard let nonPrefixLen = conditionals.promptTextLenWithoutPrefix, nonPrefixLen > 0 else {
+      return nil
+    }
+    let speechTokenCount = Float(conditionals.promptSpeechTokenLen[0].item(Int32.self))
+    return speechTokenCount / Float(nonPrefixLen)
+  }
 }
 
 /// Default reference audio URL - LJ Speech Dataset sample
@@ -587,10 +606,20 @@ public final class CosyVoice3Engine: TTSEngine {
   ///
   /// Automatically selects zero-shot or cross-lingual mode based on whether the speaker
   /// has an explicit reference transcription.
+  ///
+  /// - Parameters:
+  ///   - speed: Manual playback-rate control applied in the mel domain (matches the
+  ///     `speed` argument in the reference PyTorch implementation's `token2wav`).
+  ///     `speed < 1` slows the output, `> 1` speeds it up; pitch is preserved.
+  ///   - targetTokensPerTextToken: When set, overrides `speed` with an automatically
+  ///     derived value so the output's tokens-per-character rate matches the given
+  ///     target (e.g. a reference clip's natural rate). See `CosyVoice3Model.synthesize`.
   public func generate(
     _ text: String,
     speaker: CosyVoice3Speaker? = nil,
-    instruction: String? = nil
+    instruction: String? = nil,
+    speed: Float = 1.0,
+    targetTokensPerTextToken: Float? = nil
   ) async throws -> AudioResult {
     guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       throw TTSError.invalidArgument("Text cannot be empty")
@@ -657,7 +686,9 @@ public final class CosyVoice3Engine: TTSEngine {
           textTokens: textTokens,
           conditionals: speaker.conditionals,
           sampling: sampling,
-          nTimesteps: nTimesteps
+          nTimesteps: nTimesteps,
+          speed: speed,
+          targetTokensPerTextToken: targetTokensPerTextToken
         )
       } else {
         try await cosyVoice3TTS.generateCrossLingual(
@@ -665,7 +696,9 @@ public final class CosyVoice3Engine: TTSEngine {
           textTokens: textTokens,
           conditionals: speaker.conditionals,
           sampling: sampling,
-          nTimesteps: nTimesteps
+          nTimesteps: nTimesteps,
+          speed: speed,
+          targetTokensPerTextToken: targetTokensPerTextToken
         )
       }
 

@@ -152,7 +152,65 @@ class CosyVoice3Model: Module {
     return audio
   }
 
+  // MARK: - Speed control
+
+  /// Resolves the effective speed factor for mel time-scaling.
+  ///
+  /// When `targetTokensPerTextToken` is provided, derives the factor automatically from
+  /// the actual generated token count so the output's tokens-per-text-token rate matches
+  /// the target (`speed = generatedRatio / target`); otherwise uses `manualSpeed`. The
+  /// result is clamped to `[0.7, 1.4]` to avoid extreme stretching. A factor `< 1` slows
+  /// the output down.
+  static func resolveSpeed(
+    manualSpeed: Float,
+    targetTokensPerTextToken: Float?,
+    generatedTokenCount: Int,
+    textLen: MLXArray
+  ) -> Float {
+    guard let target = targetTokensPerTextToken, target > 0 else {
+      return manualSpeed
+    }
+    let textTokenCount = Float(textLen[0].item(Int32.self))
+    guard textTokenCount > 0 else { return manualSpeed }
+    let genRatio = Float(generatedTokenCount) / textTokenCount
+    return min(max(genRatio / target, 0.7), 1.4)
+  }
+
+  /// Linearly interpolates a mel spectrogram `[1, 80, T]` along the time axis (axis 2) to
+  /// `T' = round(T / speed)`, matching `F.interpolate(mode: "linear", alignCorners: false)`
+  /// with half-pixel sampling. Returns the input unchanged when `speed == 1` or `T < 2`.
+  static func applySpeedToMel(_ mel: MLXArray, speed: Float) -> MLXArray {
+    let t = mel.shape[2]
+    guard speed != 1.0, t >= 2 else { return mel }
+    let targetLen = max(1, Int((Float(t) / speed).rounded()))
+    if targetLen == t { return mel }
+
+    // align_corners == false, half-pixel: src(i) = (i + 0.5) * (T/T') - 0.5, clamped to [0, T-1]
+    let scale = Float(t) / Float(targetLen)
+    let dstIdx = MLXArray((0 ..< targetLen).map { Float($0) })
+    var src = (dstIdx + 0.5) * scale - 0.5
+    src = MLX.clip(src, min: MLXArray(Float(0)), max: MLXArray(Float(t - 1)))
+    let lo = MLX.floor(src).asType(.int32)
+    let hi = MLX.minimum(lo + Int32(1), MLXArray(Int32(t - 1)))
+    let frac = (src - lo.asType(.float32)).reshaped(1, 1, targetLen)
+
+    let melLo = mel.take(lo, axis: 2) // [1, 80, T']
+    let melHi = mel.take(hi, axis: 2) // [1, 80, T']
+    return melLo * (1 - frac) + melHi * frac
+  }
+
   /// Full TTS pipeline: text -> audio (zero-shot mode)
+  ///
+  /// Mel-domain speed control mirrors the reference PyTorch implementation
+  /// (`cosyvoice/cli/model.py` `token2wav`), which time-scales the flow-produced mel with
+  /// `F.interpolate(tts_mel, size: Int(T / speed), mode: "linear")` before the vocoder.
+  /// `speed < 1` adds mel frames -> longer, slower audio; frequency bins are untouched so
+  /// pitch is preserved and HiFi-GAN resynthesizes naturally.
+  /// - speed: manual factor (matches the reference `speed` argument).
+  /// - targetTokensPerTextToken: when non-nil, the factor is derived from the actual
+  ///   generated token count (overriding `speed`) so the output's tokens-per-text-token
+  ///   rate tracks the target. Useful because zero-shot does not otherwise reproduce a
+  ///   reference's speaking rate.
   func synthesize(
     text: MLXArray,
     textLen: MLXArray,
@@ -166,7 +224,9 @@ class CosyVoice3Model: Module {
     sampling: Int = 25,
     nTimesteps: Int = 10,
     maxTokenTextRatio: Float = 20.0,
-    minTokenTextRatio: Float = 2.0
+    minTokenTextRatio: Float = 2.0,
+    speed: Float = 1.0,
+    targetTokensPerTextToken: Float? = nil
   ) throws -> MLXArray {
     let totalStart = CFAbsoluteTimeGetCurrent()
 
@@ -216,11 +276,20 @@ class CosyVoice3Model: Module {
     let flowTime = CFAbsoluteTimeGetCurrent() - flowStart
     print("[Flow] Completed in \(String(format: "%.2f", flowTime))s")
 
+    // Time-scale the mel before the vocoder (see `synthesize` for details).
+    let effectiveSpeed = Self.resolveSpeed(
+      manualSpeed: speed,
+      targetTokensPerTextToken: targetTokensPerTextToken,
+      generatedTokenCount: tokens.count,
+      textLen: textLen
+    )
+    let speedMel = Self.applySpeedToMel(mel, speed: effectiveSpeed)
+
     // Step 3: Convert mel to audio
     print("[HiFi-GAN] Converting mel to audio...")
     let hiStart = CFAbsoluteTimeGetCurrent()
 
-    let audio = try melToAudio(mel: mel)
+    let audio = try melToAudio(mel: speedMel)
 
     let hiTime = CFAbsoluteTimeGetCurrent() - hiStart
     print("[HiFi-GAN] Completed in \(String(format: "%.2f", hiTime))s")
@@ -247,7 +316,9 @@ class CosyVoice3Model: Module {
     sampling: Int = 25,
     nTimesteps: Int = 10,
     maxTokenTextRatio: Float = 20.0,
-    minTokenTextRatio: Float = 2.0
+    minTokenTextRatio: Float = 2.0,
+    speed: Float = 1.0,
+    targetTokensPerTextToken: Float? = nil
   ) throws -> MLXArray {
     try synthesize(
       text: text,
@@ -262,7 +333,9 @@ class CosyVoice3Model: Module {
       sampling: sampling,
       nTimesteps: nTimesteps,
       maxTokenTextRatio: maxTokenTextRatio,
-      minTokenTextRatio: minTokenTextRatio
+      minTokenTextRatio: minTokenTextRatio,
+      speed: speed,
+      targetTokensPerTextToken: targetTokensPerTextToken
     )
   }
 
@@ -283,7 +356,9 @@ class CosyVoice3Model: Module {
     sampling: Int = 25,
     nTimesteps: Int = 10,
     maxTokenTextRatio: Float = 20.0,
-    minTokenTextRatio: Float = 2.0
+    minTokenTextRatio: Float = 2.0,
+    speed: Float = 1.0,
+    targetTokensPerTextToken: Float? = nil
   ) throws -> MLXArray {
     let totalStart = CFAbsoluteTimeGetCurrent()
 
@@ -337,9 +412,18 @@ class CosyVoice3Model: Module {
     let flowTime = CFAbsoluteTimeGetCurrent() - flowStart
     print("[Flow] Completed in \(String(format: "%.2f", flowTime))s, mel shape: \(mel.shape)")
 
+    // Time-scale the mel before the vocoder (see `synthesize` for details).
+    let effectiveSpeed = Self.resolveSpeed(
+      manualSpeed: speed,
+      targetTokensPerTextToken: targetTokensPerTextToken,
+      generatedTokenCount: tokens.count,
+      textLen: textLen
+    )
+    let speedMel = Self.applySpeedToMel(mel, speed: effectiveSpeed)
+
     print("[HiFi-GAN] Converting mel to audio...")
     let hiStart = CFAbsoluteTimeGetCurrent()
-    let audio = try melToAudio(mel: mel)
+    let audio = try melToAudio(mel: speedMel)
     let hiTime = CFAbsoluteTimeGetCurrent() - hiStart
     print("[HiFi-GAN] Completed in \(String(format: "%.2f", hiTime))s, audio shape: \(audio.shape)")
 
@@ -740,6 +824,11 @@ struct CosyVoice3Conditionals: @unchecked Sendable {
   let speakerEmbedding: MLXArray
   let promptText: MLXArray?
   let promptTextLen: MLXArray?
+  /// Token count of the prompt text excluding the system prefix
+  /// ("You are a helpful assistant.<|endofprompt|>"). Used to compute the reference's true
+  /// speech-token/text-token ratio (the auto speed target) without the prefix inflating the
+  /// denominator. `nil` when no reference text was supplied (cross-lingual).
+  var promptTextLenWithoutPrefix: Int? = nil
 }
 
 // MARK: - CosyVoice3FlowModule
