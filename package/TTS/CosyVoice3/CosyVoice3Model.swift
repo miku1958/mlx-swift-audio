@@ -156,15 +156,22 @@ class CosyVoice3Model: Module {
 
   /// Resolves the effective speed factor for mel time-scaling.
   ///
-  /// When `targetTokensPerTextToken` is provided, derives the factor automatically from
-  /// the actual generated token count so the output's tokens-per-text-token rate matches
-  /// the target (`speed = generatedRatio / target`); otherwise uses `manualSpeed`. The
-  /// result is clamped to `[0.7, 1.4]` to avoid extreme stretching. A factor `< 1` slows
-  /// the output down.
+  /// When `targetTokensPerTextToken` is provided, derives the factor automatically so the
+  /// output's voiced tokens-per-text-token rate matches the target
+  /// (`speed = generatedVoicedRatio / target`); otherwise uses `manualSpeed`. The result is
+  /// clamped to `[0.7, 1.4]` to avoid extreme stretching. A factor `< 1` slows the output
+  /// down.
+  ///
+  /// Silent/breath tokens are excluded from `generatedTokens` here, matching how
+  /// `targetTokensPerTextToken` is computed from the reference (see
+  /// `CosyVoice3Speaker.promptTokensPerTextTokenRatio`). Counting them on only one side
+  /// would bias the speed: the generated text usually has fewer pauses than a reference, so
+  /// an all-tokens generated ratio over a voiced-only target ratio comes out systematically
+  /// too fast.
   static func resolveSpeed(
     manualSpeed: Float,
     targetTokensPerTextToken: Float?,
-    generatedTokenCount: Int,
+    generatedTokens: [Int],
     textLen: MLXArray
   ) -> Float {
     guard let target = targetTokensPerTextToken, target > 0 else {
@@ -172,7 +179,8 @@ class CosyVoice3Model: Module {
     }
     let textTokenCount = Float(textLen[0].item(Int32.self))
     guard textTokenCount > 0 else { return manualSpeed }
-    let genRatio = Float(generatedTokenCount) / textTokenCount
+    let voicedCount = generatedTokens.reduce(0) { cosyVoice3SilentTokens.contains($1) ? $0 : $0 + 1 }
+    let genRatio = Float(voicedCount) / textTokenCount
     return min(max(genRatio / target, 0.7), 1.4)
   }
 
@@ -280,7 +288,7 @@ class CosyVoice3Model: Module {
     let effectiveSpeed = Self.resolveSpeed(
       manualSpeed: speed,
       targetTokensPerTextToken: targetTokensPerTextToken,
-      generatedTokenCount: tokens.count,
+      generatedTokens: tokens,
       textLen: textLen
     )
     let speedMel = Self.applySpeedToMel(mel, speed: effectiveSpeed)
@@ -416,7 +424,7 @@ class CosyVoice3Model: Module {
     let effectiveSpeed = Self.resolveSpeed(
       manualSpeed: speed,
       targetTokensPerTextToken: targetTokensPerTextToken,
-      generatedTokenCount: tokens.count,
+      generatedTokens: tokens,
       textLen: textLen
     )
     let speedMel = Self.applySpeedToMel(mel, speed: effectiveSpeed)
