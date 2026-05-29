@@ -12,7 +12,7 @@ import MLXNN
 /// FSQ silent and breath tokens (from PyTorch CosyVoice3Model)
 /// These are filtered during streaming to avoid excessive pauses
 let cosyVoice3SilentTokens: Set<Int> = [1, 2, 28, 29, 55, 248, 494, 2241, 2242, 2322, 2323]
-private let maxSilentTokenNum = 5
+let cosyVoice3MaxSilentTokenNum = 5
 
 // MARK: - CosyVoice3 Main Model
 
@@ -686,7 +686,7 @@ class CosyVoice3Model: Module {
           // Filter consecutive silent tokens (matches PyTorch llm_job)
           if filterSilentTokens, cosyVoice3SilentTokens.contains(token) {
             curSilentTokenNum += 1
-            if curSilentTokenNum > maxSilentTokenNum {
+            if curSilentTokenNum > cosyVoice3MaxSilentTokenNum {
               continue
             }
           } else {

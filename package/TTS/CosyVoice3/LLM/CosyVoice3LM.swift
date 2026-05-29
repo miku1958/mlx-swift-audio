@@ -208,7 +208,31 @@ class CosyVoice3LM: Module {
       currentInput = speechEmbedding.weight[topIds].reshaped(1, 1, -1)
     }
 
-    return outTokens
+    // Trim silent/breath tokens from the generated sequence:
+    // - Drop the leading run entirely: each text chunk is generated independently and the
+    //   model tends to begin with an inhale/breath, which on concatenation becomes an
+    //   audible breath at the start of every chunk.
+    // - Cap interior runs at `cosyVoice3MaxSilentTokenNum`, matching the PyTorch `llm_job`
+    //   and the streaming path (the non-streaming loop previously kept all of them, so long
+    //   pauses survived into the mel).
+    // Sampling above is unchanged (it still sees the full history); only the returned
+    // sequence is trimmed.
+    var filtered: [Int] = []
+    filtered.reserveCapacity(outTokens.count)
+    var consecutiveSilent = 0
+    var seenVoiced = false
+    for token in outTokens {
+      if cosyVoice3SilentTokens.contains(token) {
+        if !seenVoiced { continue } // leading breath/inhale
+        consecutiveSilent += 1
+        if consecutiveSilent > cosyVoice3MaxSilentTokenNum { continue }
+      } else {
+        seenVoiced = true
+        consecutiveSilent = 0
+      }
+      filtered.append(token)
+    }
+    return filtered
   }
 
   /// Streaming inference - yields tokens one by one as an AsyncStream
