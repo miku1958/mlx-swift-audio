@@ -208,6 +208,10 @@ public final class CosyVoice3Engine: TTSEngine {
   @ObservationIgnored private var cachedSourceAudioURL: URL?
   @ObservationIgnored private let downloader: any Downloader
   @ObservationIgnored private let tokenizerLoader: any TokenizerLoader
+  /// When set, load the CosyVoice3 model weights/config/tokenizer from this local directory
+  /// instead of downloading `defaultRepoId` from the Hub. Useful when the desired quantization
+  /// variant lives in a local folder (e.g. a different repo than the hard-coded default).
+  @ObservationIgnored private let modelDirectory: URL?
 
   /// Repo ID for S3 tokenizer
   private static let s3TokenizerRepoId = "mlx-community/S3TokenizerV3"
@@ -221,10 +225,12 @@ public final class CosyVoice3Engine: TTSEngine {
 
   public init(
     from downloader: any Downloader = HubClient.default,
-    using tokenizerLoader: any TokenizerLoader = TokenizersLoader()
+    using tokenizerLoader: any TokenizerLoader = TokenizersLoader(),
+    modelDirectory: URL? = nil
   ) {
     self.downloader = downloader
     self.tokenizerLoader = tokenizerLoader
+    self.modelDirectory = modelDirectory
     Log.tts.debug("CosyVoice3Engine initialized")
   }
 
@@ -239,12 +245,16 @@ public final class CosyVoice3Engine: TTSEngine {
     Log.model.info("Loading CosyVoice3 TTS model...")
 
     do {
-      // Load CosyVoice3 model
-      cosyVoice3TTS = try await CosyVoice3TTS.load(
-        from: downloader,
-        using: tokenizerLoader,
-        progressHandler: progressHandler ?? { _ in }
-      )
+      // Load CosyVoice3 model — from a local directory when provided, otherwise from the Hub.
+      if let modelDirectory {
+        cosyVoice3TTS = try await CosyVoice3TTS.load(from: modelDirectory, using: tokenizerLoader)
+      } else {
+        cosyVoice3TTS = try await CosyVoice3TTS.load(
+          from: downloader,
+          using: tokenizerLoader,
+          progressHandler: progressHandler ?? { _ in }
+        )
+      }
 
       // Load S3TokenizerV3
       Log.model.info("Loading S3TokenizerV3...")
